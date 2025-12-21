@@ -1,0 +1,1086 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse
+import json
+import math
+import os
+import sys
+from datetime import datetime, timezone
+from typing import Dict, Optional
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+
+
+def _require_pillow():
+    if Image is None or ImageDraw is None or ImageFont is None:
+        print("error: Pillow is required. Install with: python3 -m pip install pillow", file=sys.stderr)
+        sys.exit(2)
+
+
+SPEC_HELP = """
+Spec JSON schema (minimal):
+{
+  "defaults": {
+    "auto_scale": true,
+    "units": "px",
+    "outline": true,
+    "auto_fit": true,
+    "fit_mode": "luma",
+    "fit_threshold": 160,
+    "fit_target": "dark",
+    "fit_min_pixels": 30,
+    "fit_min_coverage": 0.6,
+    "fit_pad": 0
+  },
+  "annotations": [
+    {"type": "rect", "x": "10%", "y": "20%", "w": "35%", "h": "12%", "intent": "target", "action": "inspect", "color": "#FF3B30"},
+    {"type": "arrow", "x1": 60, "y1": 140, "x2": 120, "y2": 100, "intent": "flow", "action": "click", "color": "#0A84FF"},
+    {"type": "text", "x": 130, "y": 90, "text": "Add button", "color": "#FFFFFF"},
+    {"type": "spotlight", "x": 110, "y": 70, "w": 190, "h": 60, "radius": 10}
+  ]
+}
+
+Notes:
+- auto-fit is enabled by default for rect/spotlight; disable with "fit": false or defaults.auto_fit=false.
+- auto-fit snaps the original rect/spotlight to detected pixels (keeps size and recenters if detected area is smaller).
+- coordinate fields accept px (default), "%" strings, and rel/fraction units via defaults.units="rel" or annotation.units="rel".
+- anchor arrows/text by using id/nearest (optional):
+  {"type":"rect","id":"cta",...}, {"type":"text","text":"CTA","anchor":"cta"},
+  {"type":"arrow","from":"cta","to":"nearest"}
+- semantic fields like "intent" and "action" are preserved in annotation metadata sidecars.
+"""
+
+
+def _parse_color(value: str):
+    if not value:
+        return None
+    val = value.strip()
+    if val.startswith("#"):
+        hexval = val[1:]
+        if len(hexval) == 6:
+            r = int(hexval[0:2], 16)
+            g = int(hexval[2:4], 16)
+            b = int(hexval[4:6], 16)
+            return (r, g, b, 255)
+        if len(hexval) == 8:
+            r = int(hexval[0:2], 16)
+            g = int(hexval[2:4], 16)
+            b = int(hexval[4:6], 16)
+            a = int(hexval[6:8], 16)
+            return (r, g, b, a)
+        raise ValueError(f"unsupported hex color: {value}")
+    if val.lower().startswith("rgba(") and val.endswith(")"):
+        parts = [p.strip() for p in val[5:-1].split(",")]
+        if len(parts) != 4:
+            raise ValueError(f"invalid rgba color: {value}")
+        r, g, b = [int(float(p)) for p in parts[:3]]
+        a = float(parts[3])
+        if a <= 1:
+            a = int(round(a * 255))
+        else:
+            a = int(round(a))
+        return (r, g, b, a)
+    raise ValueError(f"unsupported color format: {value}")
+
+
+def _load_font(font_name: Optional[str], size: int):
+    if font_name:
+        try:
+            return ImageFont.truetype(font_name, size=size)
+        except Exception:
+            pass
+    for candidate in ("Helvetica", "Arial"):
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _color_luma(color) -> float:
+    if not color:
+        return 0.0
+    r, g, b, _ = color
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+
+
+def _auto_outline(color):
+    if not color:
+        return (0, 0, 0, 220)
+    return (0, 0, 0, 220) if _color_luma(color) > 0.6 else (255, 255, 255, 220)
+
+
+def _scale_default(value: float, scale: float, minimum: int = 1) -> int:
+    return max(minimum, int(round(value * scale)))
+
+
+def _units_is_rel(units) -> bool:
+    if units is None:
+        return False
+    if isinstance(units, bool):
+        return units
+    key = str(units).strip().lower()
+    return key in ("rel", "relative", "ratio", "fraction", "normalized")
+
+
+def _resolve_measure(value, span: float, default_rel: bool = False):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) * span if default_rel else float(value)
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        lower = raw.lower()
+        try:
+            if lower.endswith("%"):
+                return float(lower[:-1]) * span / 100.0
+            if lower.endswith("rel"):
+                ratio = float(lower[:-3])
+                if abs(ratio) > 1.0:
+                    ratio = ratio / 100.0
+                return ratio * span
+            if lower.endswith("px"):
+                return float(lower[:-2])
+            numeric = float(lower)
+            return numeric * span if default_rel else numeric
+        except Exception:
+            return None
+    return None
+
+
+def _resolve_offset_units(value, image_size, default_rel: bool = False):
+    width, height = image_size
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        dx = _resolve_measure(value[0], width, default_rel)
+        dy = _resolve_measure(value[1], height, default_rel)
+        if dx is None or dy is None:
+            return None
+        return [dx, dy]
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.split(",")]
+        if len(parts) >= 2:
+            dx = _resolve_measure(parts[0], width, default_rel)
+            dy = _resolve_measure(parts[1], height, default_rel)
+            if dx is None or dy is None:
+                return None
+            return [dx, dy]
+    return None
+
+
+def _resolve_region_units(region, image_size, default_rel: bool = False):
+    width, height = image_size
+    if isinstance(region, dict):
+        x = _resolve_measure(region.get("x"), width, default_rel)
+        y = _resolve_measure(region.get("y"), height, default_rel)
+        w = _resolve_measure(region.get("w"), width, default_rel)
+        h = _resolve_measure(region.get("h"), height, default_rel)
+        if x is None or y is None or w is None or h is None:
+            return region
+        return {"x": x, "y": y, "w": w, "h": h}
+    if isinstance(region, (list, tuple)) and len(region) >= 4:
+        x = _resolve_measure(region[0], width, default_rel)
+        y = _resolve_measure(region[1], height, default_rel)
+        w = _resolve_measure(region[2], width, default_rel)
+        h = _resolve_measure(region[3], height, default_rel)
+        if x is None or y is None or w is None or h is None:
+            return region
+        return [x, y, w, h]
+    return region
+
+
+def _resolve_annotation_units(ann: dict, image_size, defaults: Optional[dict]) -> dict:
+    defaults = defaults or {}
+    updated = dict(ann)
+    units_value = updated.get("units", defaults.get("units", "px"))
+    default_rel = _units_is_rel(units_value)
+    width, height = image_size
+
+    coord_fields = (
+        ("x", width),
+        ("x1", width),
+        ("x2", width),
+        ("w", width),
+        ("y", height),
+        ("y1", height),
+        ("y2", height),
+        ("h", height),
+    )
+    for key, span in coord_fields:
+        if key in updated:
+            resolved = _resolve_measure(updated.get(key), span, default_rel)
+            if resolved is not None:
+                updated[key] = resolved
+
+    for key in ("anchor_offset", "from_offset", "to_offset"):
+        if key in updated:
+            resolved_offset = _resolve_offset_units(updated.get(key), image_size, default_rel)
+            if resolved_offset is not None:
+                updated[key] = resolved_offset
+
+    for anchor_key in ("anchor", "from", "to"):
+        anchor_value = updated.get(anchor_key)
+        if isinstance(anchor_value, dict) and "offset" in anchor_value:
+            anchor_units = anchor_value.get("units", units_value)
+            anchor_rel = _units_is_rel(anchor_units)
+            anchor_updated = dict(anchor_value)
+            resolved_offset = _resolve_offset_units(anchor_updated.get("offset"), image_size, anchor_rel)
+            if resolved_offset is not None:
+                anchor_updated["offset"] = resolved_offset
+            updated[anchor_key] = anchor_updated
+
+    fit = updated.get("fit")
+    if isinstance(fit, dict):
+        fit_units = fit.get("units", units_value)
+        fit_rel = _units_is_rel(fit_units)
+        fit_updated = dict(fit)
+        if "region" in fit_updated:
+            fit_updated["region"] = _resolve_region_units(fit_updated.get("region"), image_size, fit_rel)
+        if "pad" in fit_updated:
+            resolved_pad = _resolve_measure(fit_updated.get("pad"), max(image_size), fit_rel)
+            if resolved_pad is not None:
+                fit_updated["pad"] = resolved_pad
+        updated["fit"] = fit_updated
+
+    return updated
+
+
+def _resolve_scale(defaults: Optional[dict], image_size) -> float:
+    defaults = defaults or {}
+    if "scale" in defaults:
+        try:
+            return float(defaults["scale"])
+        except Exception:
+            pass
+    auto_scale = defaults.get("auto_scale", True)
+    if isinstance(auto_scale, str):
+        auto_scale = auto_scale.strip().lower() not in ("0", "false", "no")
+    if not auto_scale:
+        return 1.0
+    max_dim = max(image_size)
+    return min(2.0, max(1.0, max_dim / 1200.0))
+
+
+def _merge_defaults(defaults: Optional[dict], ann: dict) -> dict:
+    if not defaults:
+        return ann
+    merged = dict(defaults)
+    merged.update(ann)
+    return merged
+
+
+def _clamp(value: int, min_value: int, max_value: int) -> int:
+    return max(min_value, min(max_value, value))
+
+
+def _normalize_fit(fit):
+    if fit is None:
+        return None
+    if isinstance(fit, bool):
+        return {} if fit else None
+    if isinstance(fit, str):
+        return {"mode": fit}
+    if isinstance(fit, dict):
+        return dict(fit)
+    return None
+
+
+def _parse_region(region, ann: dict, image_size):
+    width, height = image_size
+    x = y = w = h = None
+    if region:
+        if isinstance(region, dict):
+            x = region.get("x")
+            y = region.get("y")
+            w = region.get("w")
+            h = region.get("h")
+        elif isinstance(region, (list, tuple)) and len(region) >= 4:
+            x, y, w, h = region[:4]
+    if x is None or y is None or w is None or h is None:
+        x = ann.get("x")
+        y = ann.get("y")
+        w = ann.get("w")
+        h = ann.get("h")
+    if x is None or y is None or w is None or h is None:
+        return (0, 0, width, height)
+    try:
+        x = float(x)
+        y = float(y)
+        w = float(w)
+        h = float(h)
+    except Exception:
+        return (0, 0, width, height)
+    x0 = _clamp(int(round(x)), 0, width)
+    y0 = _clamp(int(round(y)), 0, height)
+    x1 = _clamp(int(round(x + w)), 0, width)
+    y1 = _clamp(int(round(y + h)), 0, height)
+    if x1 <= x0 or y1 <= y0:
+        return (0, 0, width, height)
+    return (x0, y0, x1, y1)
+
+
+def _fit_bbox_luma(image_rgb: Image.Image, region, threshold: float, target: str, min_pixels: int):
+    pixels = image_rgb.load()
+    x0, y0, x1, y1 = region
+    minx = miny = 10**9
+    maxx = maxy = -1
+    count = 0
+    dark = target != "light"
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            r, g, b = pixels[x, y]
+            luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            if (luma <= threshold) if dark else (luma >= threshold):
+                count += 1
+                if x < minx:
+                    minx = x
+                if y < miny:
+                    miny = y
+                if x > maxx:
+                    maxx = x
+                if y > maxy:
+                    maxy = y
+    if count < max(1, min_pixels) or maxx < 0:
+        return None
+    return (minx, miny, maxx, maxy)
+
+
+def _fit_bbox_color(image_rgb: Image.Image, region, color, tolerance: float, min_pixels: int):
+    if not color:
+        return None
+    pixels = image_rgb.load()
+    x0, y0, x1, y1 = region
+    minx = miny = 10**9
+    maxx = maxy = -1
+    count = 0
+    r0, g0, b0, _ = color
+    tol = max(0.0, float(tolerance))
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            r, g, b = pixels[x, y]
+            if max(abs(r - r0), abs(g - g0), abs(b - b0)) <= tol:
+                count += 1
+                if x < minx:
+                    minx = x
+                if y < miny:
+                    miny = y
+                if x > maxx:
+                    maxx = x
+                if y > maxy:
+                    maxy = y
+    if count < max(1, min_pixels) or maxx < 0:
+        return None
+    return (minx, miny, maxx, maxy)
+
+
+def _expand_bbox(bbox, pad: float, image_size):
+    if not bbox:
+        return None
+    width, height = image_size
+    x0, y0, x1, y1 = bbox
+    pad = float(pad or 0)
+    x0 = _clamp(int(round(x0 - pad)), 0, width)
+    y0 = _clamp(int(round(y0 - pad)), 0, height)
+    x1 = _clamp(int(round(x1 + pad)), 0, width)
+    y1 = _clamp(int(round(y1 + pad)), 0, height)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1, y1)
+
+
+def _snap_bbox_to_region(region, bbox, image_size):
+    if not bbox or not region:
+        return bbox
+    width, height = image_size
+    rx0, ry0, rx1, ry1 = region
+    bx0, by0, bx1, by1 = bbox
+    region_w = rx1 - rx0
+    region_h = ry1 - ry0
+    bbox_w = bx1 - bx0
+    bbox_h = by1 - by0
+    if region_w <= 0 or region_h <= 0:
+        return bbox
+    if bbox_w <= region_w and bbox_h <= region_h:
+        cx, cy = _target_center(bbox)
+        x0 = _clamp(int(round(cx - region_w / 2.0)), 0, width)
+        y0 = _clamp(int(round(cy - region_h / 2.0)), 0, height)
+        x1 = _clamp(int(round(x0 + region_w)), 0, width)
+        y1 = _clamp(int(round(y0 + region_h)), 0, height)
+        if x1 <= x0 or y1 <= y0:
+            return bbox
+        return (x0, y0, x1, y1)
+    return bbox
+
+
+def _normalize_anchor_spec(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return {"nearest": True} if value else None
+    if isinstance(value, (int, float)):
+        return {"index": int(value)}
+    if isinstance(value, str):
+        if value.strip().lower() == "nearest":
+            return {"nearest": True}
+        return {"id": value}
+    if isinstance(value, dict):
+        return dict(value)
+    return None
+
+
+def _parse_offset(value):
+    if value is None:
+        return (0.0, 0.0)
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return (float(value[0]), float(value[1]))
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.replace(" ", "").split(",")]
+        if len(parts) >= 2:
+            try:
+                return (float(parts[0]), float(parts[1]))
+            except Exception:
+                return (0.0, 0.0)
+    return (0.0, 0.0)
+
+
+def _target_center(bbox):
+    x0, y0, x1, y1 = bbox
+    return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+
+
+def _bbox_from_ann(ann: dict):
+    try:
+        x = float(ann.get("x", 0))
+        y = float(ann.get("y", 0))
+        w = float(ann.get("w", 0))
+        h = float(ann.get("h", 0))
+    except Exception:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return (x, y, x + w, y + h)
+
+
+def _anchor_point(bbox, pos: str):
+    x0, y0, x1, y1 = bbox
+    cx, cy = _target_center(bbox)
+    key = (pos or "center").strip().lower().replace("-", "_")
+    mapping = {
+        "center": (cx, cy),
+        "top": (cx, y0),
+        "bottom": (cx, y1),
+        "left": (x0, cy),
+        "right": (x1, cy),
+        "top_left": (x0, y0),
+        "top_right": (x1, y0),
+        "bottom_left": (x0, y1),
+        "bottom_right": (x1, y1),
+    }
+    return mapping.get(key, (cx, cy))
+
+
+def _resolve_target(anchor_spec, targets, fallback_point):
+    if not targets:
+        return None
+    spec = anchor_spec or {}
+    target_id = spec.get("id")
+    target_index = spec.get("index")
+    target_type = spec.get("type")
+    candidates = targets
+    if target_type:
+        candidates = [t for t in candidates if t.get("type") == target_type]
+    if target_id:
+        for t in candidates:
+            if t.get("id") == target_id:
+                return t
+    if target_index is not None:
+        for t in candidates:
+            if t.get("index") == target_index:
+                return t
+    if spec.get("nearest") or not (target_id or target_index or target_type):
+        fx, fy = fallback_point
+        best = None
+        best_dist = None
+        for t in candidates:
+            tx, ty = _target_center(t["bbox"])
+            dist = (tx - fx) ** 2 + (ty - fy) ** 2
+            if best_dist is None or dist < best_dist:
+                best = t
+                best_dist = dist
+        return best
+    return None
+
+
+def _resolve_anchor_pos(value, defaults: Optional[dict], fallback: str):
+    defaults = defaults or {}
+    if value:
+        return value
+    if defaults.get("anchor_pos"):
+        return defaults.get("anchor_pos")
+    return fallback
+
+
+def _resolve_anchor_offset(value, defaults: Optional[dict], fallback=None):
+    defaults = defaults or {}
+    if value is not None:
+        return _parse_offset(value)
+    if defaults.get("anchor_offset") is not None:
+        return _parse_offset(defaults.get("anchor_offset"))
+    if fallback is not None:
+        return _parse_offset(fallback)
+    return (0.0, 0.0)
+
+
+def _apply_text_anchor(ann: dict, targets, defaults: Optional[dict], image_size):
+    anchor_spec = _normalize_anchor_spec(ann.get("anchor"))
+    if not anchor_spec:
+        return ann
+    x = float(ann.get("x", image_size[0] / 2))
+    y = float(ann.get("y", image_size[1] / 2))
+    target = _resolve_target(anchor_spec, targets, (x, y))
+    if not target:
+        return ann
+    pos = anchor_spec.get("pos") or ann.get("anchor_pos")
+    pos = _resolve_anchor_pos(pos, defaults, "top")
+    offset = anchor_spec.get("offset") or ann.get("anchor_offset")
+    dx, dy = _resolve_anchor_offset(offset, defaults)
+    ax, ay = _anchor_point(target["bbox"], pos)
+    updated = dict(ann)
+    updated["x"] = ax + dx
+    updated["y"] = ay + dy
+    return updated
+
+
+def _apply_arrow_anchor(ann: dict, targets, defaults: Optional[dict], image_size):
+    from_spec = _normalize_anchor_spec(ann.get("from"))
+    to_spec = _normalize_anchor_spec(ann.get("to"))
+    if not from_spec and not to_spec:
+        return ann
+    updated = dict(ann)
+    if from_spec:
+        x1 = float(ann.get("x1", image_size[0] / 2))
+        y1 = float(ann.get("y1", image_size[1] / 2))
+        target = _resolve_target(from_spec, targets, (x1, y1))
+        if target:
+            pos = from_spec.get("pos") or ann.get("from_pos")
+            pos = _resolve_anchor_pos(pos, defaults, "center")
+            offset = from_spec.get("offset") or ann.get("from_offset")
+            dx, dy = _resolve_anchor_offset(offset, defaults, None)
+            ax, ay = _anchor_point(target["bbox"], pos)
+            updated["x1"] = ax + dx
+            updated["y1"] = ay + dy
+    if to_spec:
+        x2 = float(ann.get("x2", image_size[0] / 2))
+        y2 = float(ann.get("y2", image_size[1] / 2))
+        target = _resolve_target(to_spec, targets, (x2, y2))
+        if target:
+            pos = to_spec.get("pos") or ann.get("to_pos")
+            pos = _resolve_anchor_pos(pos, defaults, "center")
+            offset = to_spec.get("offset") or ann.get("to_offset")
+            dx, dy = _resolve_anchor_offset(offset, defaults, None)
+            ax, ay = _anchor_point(target["bbox"], pos)
+            updated["x2"] = ax + dx
+            updated["y2"] = ay + dy
+    return updated
+
+
+def _resolve_fit_config(ann: dict, defaults: Optional[dict]):
+    defaults = defaults or {}
+    if "fit" in ann:
+        return ann.get("fit")
+    auto_fit = defaults.get("auto_fit", True)
+    if isinstance(auto_fit, str):
+        auto_fit = auto_fit.strip().lower() not in ("0", "false", "no")
+    if not auto_fit:
+        return None
+    config = {"mode": defaults.get("fit_mode", "luma")}
+    if "fit_threshold" in defaults:
+        config["threshold"] = defaults.get("fit_threshold")
+    if "fit_target" in defaults:
+        config["target"] = defaults.get("fit_target")
+    if "fit_tolerance" in defaults:
+        config["tolerance"] = defaults.get("fit_tolerance")
+    if "fit_color" in defaults:
+        config["color"] = defaults.get("fit_color")
+    if "fit_pad" in defaults:
+        config["pad"] = defaults.get("fit_pad")
+    if "fit_min_pixels" in defaults:
+        config["min_pixels"] = defaults.get("fit_min_pixels")
+    if "fit_min_coverage" in defaults:
+        config["min_coverage"] = defaults.get("fit_min_coverage")
+    return config
+
+
+def _apply_fit(ann: dict, image_rgb: Image.Image, defaults: Optional[dict]) -> dict:
+    fit = _normalize_fit(_resolve_fit_config(ann, defaults))
+    if not fit:
+        return ann
+    mode = str(fit.get("mode", "luma")).lower()
+    region = _parse_region(fit.get("region"), ann, image_rgb.size)
+    min_pixels = int(fit.get("min_pixels", 30))
+    min_coverage = float(fit.get("min_coverage", 0.6))
+    bbox = None
+    if mode == "luma":
+        threshold = float(fit.get("threshold", 160))
+        target = str(fit.get("target", "dark")).lower()
+        bbox = _fit_bbox_luma(image_rgb, region, threshold, target, min_pixels)
+    elif mode == "color":
+        color_value = fit.get("color") or fit.get("target_color")
+        color = _parse_color(color_value) if color_value else None
+        tolerance = float(fit.get("tolerance", 18))
+        bbox = _fit_bbox_color(image_rgb, region, color, tolerance, min_pixels)
+    else:
+        return ann
+    pad = float(fit.get("pad", 0))
+    bbox = _expand_bbox(bbox, pad, image_rgb.size)
+    if not bbox:
+        print(f"warn: fit({mode}) did not find pixels; using original bounds", file=sys.stderr)
+        return ann
+    region_area = max(1.0, float((region[2] - region[0]) * (region[3] - region[1])))
+    bbox_area = max(1.0, float((bbox[2] - bbox[0]) * (bbox[3] - bbox[1])))
+    if bbox_area / region_area < min_coverage:
+        snapped = _snap_bbox_to_region(region, bbox, image_rgb.size)
+        if snapped:
+            bbox = snapped
+            print(f"warn: fit({mode}) too small; snapping to detected center", file=sys.stderr)
+        else:
+            print(f"warn: fit({mode}) too small; using original bounds", file=sys.stderr)
+            return ann
+    else:
+        bbox = _snap_bbox_to_region(region, bbox, image_rgb.size)
+    x0, y0, x1, y1 = bbox
+    updated = dict(ann)
+    updated["x"] = x0
+    updated["y"] = y0
+    updated["w"] = x1 - x0
+    updated["h"] = y1 - y0
+    return updated
+
+
+def _apply_opacity(color, opacity):
+    if not color or opacity is None:
+        return color
+    try:
+        alpha = float(opacity)
+    except Exception:
+        return color
+    if alpha <= 1:
+        alpha = int(round(alpha * 255))
+    else:
+        alpha = int(round(alpha))
+    r, g, b, _ = color
+    return (r, g, b, max(0, min(255, alpha)))
+
+
+def _resolve_dim_color(ann: dict, defaults: Optional[dict]):
+    defaults = defaults or {}
+    value = ann.get("color") or ann.get("dim_color") or defaults.get("dim_color") or "rgba(0,0,0,0.45)"
+    color = _parse_color(value)
+    opacity = ann.get("opacity", defaults.get("dim_opacity"))
+    return _apply_opacity(color, opacity)
+
+
+def _draw_spotlight(overlay: Image.Image, ann: dict, scale: float, defaults: Optional[dict]):
+    color = _resolve_dim_color(ann, defaults)
+    if not color:
+        return overlay
+    layer = Image.new("RGBA", overlay.size, color)
+    draw = ImageDraw.Draw(layer)
+    padding = float(ann.get("padding", defaults.get("dim_padding", 0) if defaults else 0))
+    padding = padding * scale if padding else 0.0
+    radius = float(ann.get("radius", defaults.get("dim_radius", 0) if defaults else 0))
+    radius = radius * scale if radius else 0.0
+    x = float(ann.get("x", 0)) - padding
+    y = float(ann.get("y", 0)) - padding
+    w = float(ann.get("w", 0)) + padding * 2
+    h = float(ann.get("h", 0)) + padding * 2
+    rect = [x, y, x + w, y + h]
+    if radius > 0:
+        draw.rounded_rectangle(rect, radius=radius, fill=(0, 0, 0, 0))
+    else:
+        draw.rectangle(rect, fill=(0, 0, 0, 0))
+    return Image.alpha_composite(overlay, layer)
+
+
+def _draw_rect(draw: ImageDraw.ImageDraw, ann: dict, scale: float):
+    x = float(ann.get("x", 0))
+    y = float(ann.get("y", 0))
+    w = float(ann.get("w", 0))
+    h = float(ann.get("h", 0))
+    outline = _parse_color(ann.get("color", "#FF3B30"))
+    fill = ann.get("fill")
+    fill_color = _parse_color(fill) if fill else None
+    width = int(ann.get("width", _scale_default(3, scale, minimum=2)))
+
+    outline_enabled = ann.get("outline", True)
+    outline_width = int(ann.get("outline_width", max(2, round(width * 0.6))))
+    outline_color = _parse_color(ann.get("outline_color")) if ann.get("outline_color") else _auto_outline(outline)
+    if outline_enabled and outline_color:
+        draw.rectangle(
+            [x, y, x + w, y + h],
+            outline=outline_color,
+            width=width + outline_width * 2,
+        )
+
+    draw.rectangle([x, y, x + w, y + h], outline=outline, width=width, fill=fill_color)
+
+
+def _draw_arrow_primitive(
+    draw: ImageDraw.ImageDraw,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    color,
+    width: int,
+    head_len: float,
+    head_width: float,
+):
+    angle = math.atan2(y2 - y1, x2 - x1)
+    back_x = x2 - head_len * math.cos(angle)
+    back_y = y2 - head_len * math.sin(angle)
+
+    left_angle = angle + math.pi / 2
+    right_angle = angle - math.pi / 2
+    left_x = back_x + (head_width / 2) * math.cos(left_angle)
+    left_y = back_y + (head_width / 2) * math.sin(left_angle)
+    right_x = back_x + (head_width / 2) * math.cos(right_angle)
+    right_y = back_y + (head_width / 2) * math.sin(right_angle)
+
+    draw.line([x1, y1, back_x, back_y], fill=color, width=width)
+    draw.polygon([(x2, y2), (left_x, left_y), (right_x, right_y)], fill=color)
+
+
+def _draw_arrow(draw: ImageDraw.ImageDraw, ann: dict, scale: float):
+    x1 = float(ann.get("x1", 0))
+    y1 = float(ann.get("y1", 0))
+    x2 = float(ann.get("x2", 0))
+    y2 = float(ann.get("y2", 0))
+    color = _parse_color(ann.get("color", "#0A84FF"))
+    width = int(ann.get("width", _scale_default(3, scale, minimum=2)))
+    head_len = float(ann.get("head_len", _scale_default(12, scale, minimum=6)))
+    head_width = float(ann.get("head_width", _scale_default(8, scale, minimum=5)))
+
+    outline_enabled = ann.get("outline", True)
+    outline_width = int(ann.get("outline_width", max(2, round(width * 0.6))))
+    outline_color = _parse_color(ann.get("outline_color")) if ann.get("outline_color") else _auto_outline(color)
+    if outline_enabled and outline_color:
+        _draw_arrow_primitive(
+            draw,
+            x1,
+            y1,
+            x2,
+            y2,
+            outline_color,
+            width + outline_width * 2,
+            head_len + outline_width * 2,
+            head_width + outline_width * 2,
+        )
+
+    _draw_arrow_primitive(draw, x1, y1, x2, y2, color, width, head_len, head_width)
+
+
+def _draw_text_outline(
+    draw: ImageDraw.ImageDraw,
+    x: float,
+    y: float,
+    text: str,
+    font: ImageFont.ImageFont,
+    stroke_width: int,
+    stroke_fill,
+):
+    if stroke_width <= 0:
+        return
+    for dx in range(-stroke_width, stroke_width + 1):
+        for dy in range(-stroke_width, stroke_width + 1):
+            if dx == 0 and dy == 0:
+                continue
+            if dx * dx + dy * dy > stroke_width * stroke_width:
+                continue
+            draw.text((x + dx, y + dy), text, fill=stroke_fill, font=font)
+
+
+def _draw_text(draw: ImageDraw.ImageDraw, ann: dict, scale: float):
+    x = float(ann.get("x", 0))
+    y = float(ann.get("y", 0))
+    text = ann.get("text", "")
+    if not text:
+        return
+    color = _parse_color(ann.get("color", "#FFFFFF"))
+    size = int(ann.get("size", _scale_default(14, scale, minimum=10)))
+    font_name = ann.get("font")
+    font = _load_font(font_name, size)
+    padding = int(ann.get("padding", _scale_default(4, scale, minimum=2)))
+    bg = ann.get("bg")
+    if not bg:
+        bg = ann.get("text_bg")
+    bg_color = _parse_color(bg) if bg else None
+    outline_enabled = ann.get("outline", True)
+    outline_width = int(ann.get("outline_width", max(1, round(size * 0.12))))
+    outline_color = _parse_color(ann.get("outline_color")) if ann.get("outline_color") else _auto_outline(color)
+
+    bbox = draw.textbbox((x, y), text, font=font)
+    if bg_color:
+        rect = [
+            bbox[0] - padding,
+            bbox[1] - padding,
+            bbox[2] + padding,
+            bbox[3] + padding,
+        ]
+        draw.rectangle(rect, fill=bg_color)
+    if outline_enabled and outline_color:
+        _draw_text_outline(draw, x, y, text, font, outline_width, outline_color)
+    draw.text((x, y), text, fill=color, font=font)
+
+
+def _load_spec(path: str) -> Dict:
+    if path == "-":
+        raw = sys.stdin.read()
+    else:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+    data = json.loads(raw)
+    if isinstance(data, list):
+        return {"annotations": data, "defaults": {}}
+    if isinstance(data, dict) and "annotations" in data:
+        return {"annotations": data["annotations"], "defaults": data.get("defaults") or {}}
+    raise ValueError("spec must be a list or an object with 'annotations'")
+
+
+def _normalize_number(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if abs(value - round(value)) < 1e-6:
+            return int(round(value))
+        return round(value, 4)
+    return value
+
+
+def _extract_geometry(ann: dict, ann_type: str):
+    if ann_type in ("rect", "spotlight", "focus", "dim"):
+        fields = ("x", "y", "w", "h")
+    elif ann_type == "arrow":
+        fields = ("x1", "y1", "x2", "y2")
+    elif ann_type == "text":
+        fields = ("x", "y")
+    else:
+        fields = ()
+    geometry = {}
+    for key in fields:
+        if key in ann:
+            geometry[key] = _normalize_number(ann.get(key))
+    return geometry
+
+
+def _geometry_rel(geometry: dict, ann_type: str, image_size):
+    if not geometry:
+        return {}
+    width, height = image_size
+    rel = {}
+    x_keys = {"x", "x1", "x2", "w"}
+    y_keys = {"y", "y1", "y2", "h"}
+    for key, value in geometry.items():
+        if not isinstance(value, (int, float)):
+            continue
+        if key in x_keys and width:
+            rel[key] = round(float(value) / float(width), 6)
+        elif key in y_keys and height:
+            rel[key] = round(float(value) / float(height), 6)
+    if ann_type in ("rect", "spotlight", "focus", "dim"):
+        x = geometry.get("x")
+        y = geometry.get("y")
+        w = geometry.get("w")
+        h = geometry.get("h")
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)) and isinstance(w, (int, float)) and isinstance(h, (int, float)):
+            rel["bbox"] = {
+                "x": round(float(x) / float(width), 6) if width else None,
+                "y": round(float(y) / float(height), 6) if height else None,
+                "w": round(float(w) / float(width), 6) if width else None,
+                "h": round(float(h) / float(height), 6) if height else None,
+            }
+    return rel
+
+
+def _annotation_meta_item(index: int, ann: dict, image_size) -> dict:
+    ann_type = str(ann.get("type", "")).lower()
+    item = {
+        "index": index,
+        "type": ann_type,
+        "id": ann.get("id"),
+        "units": ann.get("units"),
+        "intent": ann.get("intent"),
+        "action": ann.get("action"),
+        "severity": ann.get("severity"),
+        "issue": ann.get("issue"),
+        "hypothesis": ann.get("hypothesis"),
+        "next_action": ann.get("next_action"),
+        "verify": ann.get("verify"),
+    }
+    geometry = _extract_geometry(ann, ann_type)
+    if geometry:
+        item["geometry"] = geometry
+        rel = _geometry_rel(geometry, ann_type, image_size)
+        if rel:
+            item["geometry_rel"] = rel
+    text_value = ann.get("text")
+    if isinstance(text_value, str) and text_value:
+        item["text"] = text_value
+    return item
+
+
+def _default_meta_out(output_path: str) -> str:
+    root, ext = os.path.splitext(output_path)
+    if ext:
+        return f"{root}.json"
+    return f"{output_path}.json"
+
+
+def main() -> int:
+    if "--spec-help" in sys.argv:
+        print(SPEC_HELP.strip())
+        return 0
+
+    parser = argparse.ArgumentParser(description="Annotate an image with arrows, rectangles, and text.")
+    parser.add_argument("input", help="Input PNG path")
+    parser.add_argument("output", help="Output PNG path")
+    parser.add_argument("--spec", required=True, help="JSON file path (or - for stdin)")
+    parser.add_argument(
+        "--meta-out",
+        help="Path to write annotation metadata sidecar (default: <output>.json)",
+    )
+    parser.add_argument("--no-meta", action="store_true", help="Disable metadata sidecar output")
+    parser.add_argument("--spec-help", action="store_true", help="Print spec schema and exit")
+    args = parser.parse_args()
+
+    if args.spec_help:
+        print(SPEC_HELP.strip())
+        return 0
+
+    _require_pillow()
+
+    if not os.path.exists(args.input):
+        print(f"error: input not found: {args.input}", file=sys.stderr)
+        return 1
+
+    try:
+        spec = _load_spec(args.spec)
+    except Exception as exc:
+        print(f"error: invalid spec: {exc}", file=sys.stderr)
+        return 1
+
+    image = Image.open(args.input).convert("RGBA")
+    image_rgb = image.convert("RGB")
+    defaults = spec.get("defaults") or {}
+    base_scale = _resolve_scale(defaults, image.size)
+    meta_out = args.meta_out or _default_meta_out(args.output)
+
+    annotations = spec.get("annotations", [])
+    spotlights = []
+    others = []
+    for idx, ann in enumerate(annotations):
+        if not isinstance(ann, dict):
+            continue
+        ann_type = str(ann.get("type", "")).lower()
+        if ann_type in ("spotlight", "focus", "dim"):
+            spotlights.append((idx, ann))
+        else:
+            others.append((idx, ann))
+
+    prepared_spotlights = []
+    prepared_others = []
+    anchor_targets = []
+    annotation_meta = []
+
+    for idx, ann in spotlights:
+        ann = _merge_defaults(defaults, ann)
+        ann = _resolve_annotation_units(ann, image.size, defaults)
+        ann = _apply_fit(ann, image_rgb, defaults)
+        prepared_spotlights.append((idx, ann))
+        bbox = _bbox_from_ann(ann)
+        if bbox:
+            anchor_targets.append(
+                {"id": ann.get("id"), "index": idx, "type": "spotlight", "bbox": bbox}
+            )
+
+    for idx, ann in others:
+        ann = _merge_defaults(defaults, ann)
+        ann = _resolve_annotation_units(ann, image.size, defaults)
+        ann_type = str(ann.get("type", "")).lower()
+        if ann_type == "rect":
+            ann = _apply_fit(ann, image_rgb, defaults)
+            bbox = _bbox_from_ann(ann)
+            if bbox:
+                anchor_targets.append(
+                    {"id": ann.get("id"), "index": idx, "type": "rect", "bbox": bbox}
+                )
+        prepared_others.append((idx, ann))
+
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    for idx, ann in prepared_spotlights:
+        ann_scale = float(ann.get("scale", base_scale))
+        try:
+            overlay = _draw_spotlight(overlay, ann, ann_scale, defaults)
+        except Exception as exc:
+            print(f"warn: failed annotation spotlight: {exc}", file=sys.stderr)
+        annotation_meta.append(_annotation_meta_item(idx, ann, image.size))
+
+    draw = ImageDraw.Draw(overlay)
+    for idx, ann in prepared_others:
+        rendered_ann = ann
+        ann_scale = float(rendered_ann.get("scale", base_scale))
+        ann_type = str(rendered_ann.get("type", "")).lower()
+        try:
+            if ann_type == "rect":
+                _draw_rect(draw, rendered_ann, ann_scale)
+            elif ann_type == "arrow":
+                rendered_ann = _apply_arrow_anchor(rendered_ann, anchor_targets, defaults, image.size)
+                _draw_arrow(draw, rendered_ann, ann_scale)
+            elif ann_type == "text":
+                rendered_ann = _apply_text_anchor(rendered_ann, anchor_targets, defaults, image.size)
+                _draw_text(draw, rendered_ann, ann_scale)
+        except Exception as exc:
+            print(f"warn: failed annotation {ann_type}: {exc}", file=sys.stderr)
+        annotation_meta.append(_annotation_meta_item(idx, rendered_ann, image.size))
+
+    combined = Image.alpha_composite(image, overlay)
+    out_dir = os.path.dirname(args.output)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    output_path = os.path.abspath(args.output)
+    combined.convert("RGB").save(output_path)
+
+    if not args.no_meta:
+        meta_path = os.path.abspath(meta_out)
+        meta_dir = os.path.dirname(meta_path)
+        if meta_dir:
+            os.makedirs(meta_dir, exist_ok=True)
+        meta_payload = {
+            "annotation_meta_version": 1,
+            "input_path": os.path.abspath(args.input),
+            "output_path": output_path,
+            "meta_path": meta_path,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "size": {"width": image.size[0], "height": image.size[1], "units": "px"},
+            "defaults": defaults,
+            "annotations": sorted(annotation_meta, key=lambda item: item.get("index", 0)),
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta_payload, f, indent=2)
+
+    print(os.path.abspath(args.output))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

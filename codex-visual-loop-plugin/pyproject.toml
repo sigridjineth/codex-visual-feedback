@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-visual-loop-plugin"
+version = "0.1.0"
+description = "Standalone Codex visual loop plugin with Rust-backed command execution and Python wrapper entrypoints."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "w00ing" }]
+dependencies = []
+
+[project.scripts]
+codex-visual-loop = "codex_visual_loop_plugin.cli:main"
+codex-visual-loop-plugin = "codex_visual_loop_plugin.cli:main"
+codex-visual-loop-feedback = "codex_visual_loop_plugin.visual_loop_feedback:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["codex_visual_loop_plugin"]

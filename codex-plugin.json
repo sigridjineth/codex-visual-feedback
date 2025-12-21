@@ -1,0 +1,6 @@
+{
+  "name": "codex-visual-loop-plugin",
+  "version": "0.1.0",
+  "description": "Root pointer to the standalone Codex plugin package.",
+  "plugin_path": "codex-visual-loop-plugin/manifest.json"
+}

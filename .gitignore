@@ -1,0 +1,9 @@
+.DS_Store
+.local/
+.omx/
+__pycache__/
+*.pyc
+
+.codex-visual-loop/
+codex-visual-loop-plugin/target/
+*.egg-info/

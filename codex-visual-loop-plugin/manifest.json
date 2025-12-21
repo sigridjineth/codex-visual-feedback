@@ -1,0 +1,62 @@
+{
+  "name": "codex-visual-loop-plugin",
+  "version": "0.1.0",
+  "description": "Rust Codex visual feedback loop plugin for macOS capture, annotation, diffing, observation packets, and AX dumps.",
+  "plugin_type": "codex-cli",
+  "implementation": "rust",
+  "entrypoint": "codex-visual-loop",
+  "bin": [
+    "codex-visual-loop"
+  ],
+  "features": [
+    "capture metadata JSON sidecars",
+    "annotation specs with semantic fields and relative units",
+    "diff-to-bbox annotated outputs",
+    "action observation packet flow",
+    "AX tree dump",
+    "capture + AX + Codex explain-app reporting",
+    "OMX team inbox-aware visual-loop feedback orchestration"
+  ],
+  "commands": [
+    {
+      "name": "capture",
+      "binary": "codex-visual-loop",
+      "doc": "commands/capture.md"
+    },
+    {
+      "name": "annotate",
+      "binary": "codex-visual-loop",
+      "doc": "commands/annotate.md"
+    },
+    {
+      "name": "diff",
+      "binary": "codex-visual-loop",
+      "doc": "commands/diff.md"
+    },
+    {
+      "name": "loop",
+      "binary": "codex-visual-loop",
+      "doc": "commands/loop.md"
+    },
+    {
+      "name": "observe",
+      "binary": "codex-visual-loop",
+      "doc": "commands/observe.md"
+    },
+    {
+      "name": "ax-tree",
+      "binary": "codex-visual-loop",
+      "doc": "commands/ax-tree.md"
+    },
+    {
+      "name": "explain-app",
+      "binary": "codex-visual-loop",
+      "doc": "commands/explain-app.md"
+    },
+    {
+      "name": "visual-loop-feedback",
+      "binary": "codex-visual-loop",
+      "doc": "commands/visual-loop-feedback.md"
+    }
+  ]
+}
