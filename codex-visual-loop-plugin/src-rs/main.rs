@@ -79,6 +79,8 @@ enum Commands {
     /// Dump accessibility tree snapshot JSON
     #[command(name = "ax-tree")]
     AxTree(AxTreeArgs),
+    /// Perform UI actions (click/type/hotkey) against a target app process
+    Act(ActArgs),
     /// Capture app + AX packet and optionally ask Codex CLI for a detailed explanation report
     #[command(name = "explain-app")]
     ExplainApp(ExplainArgs),
@@ -257,6 +259,43 @@ struct AxTreeArgs {
 }
 
 #[derive(Args, Debug)]
+struct ActArgs {
+    /// App process name (default: frontmost app)
+    #[arg(long)]
+    process: Option<String>,
+    /// Absolute screen click coordinate as x,y (points)
+    #[arg(long)]
+    click: Option<String>,
+    /// Window-relative click coordinate as x,y (points from selected window origin)
+    #[arg(long = "click-rel")]
+    click_rel: Option<String>,
+    /// Text to type (use '-' to read from stdin)
+    #[arg(long)]
+    text: Option<String>,
+    /// Press Enter/Return key after typing
+    #[arg(long, action = ArgAction::SetTrue)]
+    enter: bool,
+    /// Press Tab key N times
+    #[arg(long, default_value_t = 0)]
+    tab: u32,
+    /// Hotkey combo (examples: cmd+l, cmd+shift+p, ctrl+alt+k)
+    #[arg(long)]
+    hotkey: Option<String>,
+    /// Skip app activation before action
+    #[arg(long, action = ArgAction::SetTrue)]
+    no_activate: bool,
+    /// Delay after activation in milliseconds (default: 120)
+    #[arg(long, default_value_t = 120)]
+    activation_delay_ms: u64,
+    /// Print JSON payload
+    #[arg(long, action = ArgAction::SetTrue)]
+    json: bool,
+    /// Validate/plan only; do not execute UI actions
+    #[arg(long, action = ArgAction::SetTrue)]
+    dry_run: bool,
+}
+
+#[derive(Args, Debug)]
 struct ExplainArgs {
     /// App process name (default: frontmost app)
     #[arg(long)]
@@ -408,6 +447,14 @@ struct AxQueryResult {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct HotkeySpec {
+    combo: String,
+    key: String,
+    modifiers: Vec<String>,
+    key_code: Option<u16>,
+}
+
 #[derive(Debug)]
 struct DiffRunOutput {
     json: Value,
@@ -432,6 +479,7 @@ fn run() -> Result<()> {
         Commands::Loop(args) => command_loop(args),
         Commands::Observe(args) => command_observe(args),
         Commands::AxTree(args) => command_ax_tree(args),
+        Commands::Act(args) => command_act(args),
         Commands::ExplainApp(args) => command_explain_app(args),
     }
 }
@@ -466,6 +514,11 @@ fn print_commands() -> Result<()> {
         json!({
             "name": "ax-tree",
             "description": "Dump accessibility tree snapshots for UI grounding.",
+            "runner": "rust"
+        }),
+        json!({
+            "name": "act",
+            "description": "Perform click/type/hotkey UI actions against a target app.",
             "runner": "rust"
         }),
         json!({
@@ -1005,6 +1058,292 @@ fn command_ax_tree(args: AxTreeArgs) -> Result<()> {
         println!("{}", serde_json::to_string(&payload)?);
     } else {
         println!("{}", abs_path(&out).display());
+    }
+
+    Ok(())
+}
+
+fn command_act(args: ActArgs) -> Result<()> {
+    let process = args
+        .process
+        .clone()
+        .or_else(frontmost_app_name)
+        .unwrap_or_else(|| "app".to_string());
+
+    let mut warnings = Vec::<String>::new();
+    let mut query_window_diag: Option<QueryDiagnostic> = None;
+    let mut selected_window: Option<Value> = None;
+
+    let mut actions = Vec::<Value>::new();
+    let mut click_abs: Option<(i64, i64)> = None;
+    let mut click_rel_payload: Option<Value> = None;
+
+    if let Some(raw) = args.click.as_deref() {
+        let (x, y) = parse_coord_pair(raw)
+            .ok_or_else(|| anyhow::anyhow!("invalid --click coordinate: expected x,y"))?;
+        click_abs = Some((x, y));
+    }
+
+    if let Some(raw) = args.click_rel.as_deref() {
+        let (rx, ry) = parse_coord_pair(raw)
+            .ok_or_else(|| anyhow::anyhow!("invalid --click-rel coordinate: expected x,y"))?;
+        let probe = query_window_probe(&process);
+        query_window_diag = Some(probe.diagnostics.clone());
+        selected_window = Some(json!({
+            "index": probe.selected_index,
+            "x": probe.x,
+            "y": probe.y,
+            "w": probe.w,
+            "h": probe.h,
+            "title": probe.title,
+            "selection_mode": probe.selection_mode,
+            "candidate_count": probe.candidate_count,
+            "usable_count": probe.usable_count,
+            "usable": probe.usable,
+        }));
+        if !probe.diagnostics.ok || probe.w <= 0 || probe.h <= 0 {
+            bail!("unable to resolve --click-rel because target window bounds are unavailable");
+        }
+        let ax = probe.x.saturating_add(rx);
+        let ay = probe.y.saturating_add(ry);
+        click_rel_payload = Some(json!({
+            "x": rx,
+            "y": ry,
+            "units": "pt",
+            "resolved_abs": {"x": ax, "y": ay, "units": "pt"},
+        }));
+        click_abs = Some((ax, ay));
+    }
+
+    if let Some((x, y)) = click_abs {
+        actions.push(json!({
+            "type": "click",
+            "x": x,
+            "y": y,
+            "units": "pt",
+        }));
+    }
+
+    let text_value = match args.text.as_deref() {
+        Some("-") => {
+            let mut buf = String::new();
+            io::stdin()
+                .read_to_string(&mut buf)
+                .context("failed to read --text from stdin")?;
+            Some(buf)
+        }
+        Some(value) => Some(value.to_string()),
+        None => None,
+    };
+
+    if let Some(text) = text_value.as_ref() {
+        actions.push(json!({
+            "type": "type",
+            "text": text,
+        }));
+    }
+
+    let hotkey_spec = if let Some(raw) = args.hotkey.as_deref() {
+        let spec = parse_hotkey_combo(raw)?;
+        actions.push(json!({
+            "type": "hotkey",
+            "combo": spec.combo,
+            "key": spec.key,
+            "modifiers": spec.modifiers,
+            "key_code": spec.key_code,
+        }));
+        Some(spec)
+    } else {
+        None
+    };
+
+    if args.tab > 0 {
+        actions.push(json!({
+            "type": "tab",
+            "count": args.tab,
+        }));
+    }
+    if args.enter {
+        actions.push(json!({
+            "type": "enter",
+        }));
+    }
+
+    if actions.is_empty() {
+        bail!("no action specified. Use one or more of --click/--click-rel/--text/--hotkey/--tab/--enter");
+    }
+
+    let mut activation_diag = QueryDiagnostic {
+        ok: true,
+        attempts: 0,
+        error_code: None,
+        message: Some("activation skipped".to_string()),
+    };
+    let mut execution = Vec::<Value>::new();
+    let mut ok = true;
+
+    if !args.dry_run {
+        if !cfg!(target_os = "macos") {
+            bail!("act command requires macOS for UI automation");
+        }
+        if !args.no_activate {
+            activation_diag = activate_process_window(&process);
+            if !activation_diag.ok {
+                ok = false;
+                warnings.push("app activation failed; subsequent actions may fail".to_string());
+            }
+            if args.activation_delay_ms > 0 {
+                thread::sleep(Duration::from_millis(args.activation_delay_ms.min(5000)));
+            }
+        }
+    }
+
+    if let Some((x, y)) = click_abs {
+        if args.dry_run {
+            execution.push(json!({
+                "type": "click",
+                "status": "planned",
+                "x": x,
+                "y": y,
+            }));
+        } else {
+            let script = format!("tell application \"System Events\" to click at {{{x}, {y}}}");
+            let diag = run_osascript_exec_with_retry(&script, &[], 2, 80);
+            if !diag.ok {
+                ok = false;
+            }
+            execution.push(json!({
+                "type": "click",
+                "status": if diag.ok { "ok" } else { "error" },
+                "x": x,
+                "y": y,
+                "query": diag,
+            }));
+        }
+    }
+
+    if let Some(text) = text_value {
+        if args.dry_run {
+            execution.push(json!({
+                "type": "type",
+                "status": "planned",
+                "text": text,
+            }));
+        } else {
+            let escaped = escape_osascript_string(&text);
+            let script = format!("tell application \"System Events\" to keystroke \"{escaped}\"");
+            let diag = run_osascript_exec_with_retry(&script, &[], 2, 80);
+            if !diag.ok {
+                ok = false;
+            }
+            execution.push(json!({
+                "type": "type",
+                "status": if diag.ok { "ok" } else { "error" },
+                "text": text,
+                "query": diag,
+            }));
+        }
+    }
+
+    if let Some(spec) = hotkey_spec {
+        if args.dry_run {
+            execution.push(json!({
+                "type": "hotkey",
+                "status": "planned",
+                "combo": spec.combo,
+                "key": spec.key,
+                "modifiers": spec.modifiers,
+                "key_code": spec.key_code,
+            }));
+        } else {
+            let script = hotkey_script(&spec);
+            let diag = run_osascript_exec_with_retry(&script, &[], 2, 80);
+            if !diag.ok {
+                ok = false;
+            }
+            execution.push(json!({
+                "type": "hotkey",
+                "status": if diag.ok { "ok" } else { "error" },
+                "combo": spec.combo,
+                "key": spec.key,
+                "modifiers": spec.modifiers,
+                "key_code": spec.key_code,
+                "query": diag,
+            }));
+        }
+    }
+
+    if args.tab > 0 {
+        if args.dry_run {
+            execution.push(json!({
+                "type": "tab",
+                "status": "planned",
+                "count": args.tab,
+            }));
+        } else {
+            let script = format!(
+                "tell application \"System Events\"\nrepeat {} times\nkey code 48\nend repeat\nend tell",
+                args.tab
+            );
+            let diag = run_osascript_exec_with_retry(&script, &[], 2, 80);
+            if !diag.ok {
+                ok = false;
+            }
+            execution.push(json!({
+                "type": "tab",
+                "status": if diag.ok { "ok" } else { "error" },
+                "count": args.tab,
+                "query": diag,
+            }));
+        }
+    }
+
+    if args.enter {
+        if args.dry_run {
+            execution.push(json!({
+                "type": "enter",
+                "status": "planned",
+            }));
+        } else {
+            let script = "tell application \"System Events\" to key code 36";
+            let diag = run_osascript_exec_with_retry(script, &[], 2, 80);
+            if !diag.ok {
+                ok = false;
+            }
+            execution.push(json!({
+                "type": "enter",
+                "status": if diag.ok { "ok" } else { "error" },
+                "query": diag,
+            }));
+        }
+    }
+
+    let payload = json!({
+        "captured_at": timestamp_iso(),
+        "process_name": process,
+        "dry_run": args.dry_run,
+        "ok": ok,
+        "actions": actions,
+        "execution": execution,
+        "click_rel": click_rel_payload,
+        "window_probe": {
+            "selected_window": selected_window,
+            "query": query_window_diag,
+        },
+        "activation": activation_diag,
+        "warnings": warnings,
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string(&payload)?);
+    } else if ok {
+        println!("ok");
+    } else {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    }
+
+    if !args.dry_run && !ok {
+        bail!("one or more actions failed");
     }
 
     Ok(())
@@ -3966,6 +4305,199 @@ fn run_osascript_with_retry(
     )
 }
 
+fn run_osascript_exec_with_retry(
+    script: &str,
+    args: &[String],
+    attempts: u32,
+    delay_ms: u64,
+) -> QueryDiagnostic {
+    if !cfg!(target_os = "macos") {
+        return QueryDiagnostic {
+            ok: false,
+            attempts: 0,
+            error_code: Some("unsupported_platform".to_string()),
+            message: Some("osascript requires macOS".to_string()),
+        };
+    }
+
+    let max_attempts = attempts.max(1);
+    let timeout_ms = 1500u64;
+    let mut last_code = Some("osascript_exec_failed".to_string());
+    let mut last_message = Some("osascript execution failed".to_string());
+
+    for attempt in 1..=max_attempts {
+        let mut cmd = Command::new("osascript");
+        cmd.arg("-e").arg(script);
+        if !args.is_empty() {
+            cmd.arg("--");
+            for arg in args {
+                cmd.arg(arg);
+            }
+        }
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        match cmd.spawn() {
+            Ok(mut child) => match child.wait_timeout(Duration::from_millis(timeout_ms)) {
+                Ok(Some(_)) => match child.wait_with_output() {
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                        if output.status.success() {
+                            return QueryDiagnostic {
+                                ok: true,
+                                attempts: attempt,
+                                error_code: None,
+                                message: Some("executed".to_string()),
+                            };
+                        }
+                        let code = output.status.code().unwrap_or(1);
+                        last_code = Some(format!("osascript_exit_{code}"));
+                        last_message = Some(if stderr.is_empty() {
+                            format!("osascript failed with status {code}")
+                        } else {
+                            stderr
+                        });
+                    }
+                    Err(err) => {
+                        last_code = Some("osascript_wait_output_failed".to_string());
+                        last_message = Some(err.to_string());
+                    }
+                },
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    last_code = Some("osascript_timeout".to_string());
+                    last_message = Some(format!(
+                        "osascript timed out after {}ms (attempt {attempt}/{max_attempts})",
+                        timeout_ms
+                    ));
+                }
+                Err(err) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    last_code = Some("osascript_wait_timeout_failed".to_string());
+                    last_message = Some(err.to_string());
+                }
+            },
+            Err(err) => {
+                last_code = Some("osascript_spawn_failed".to_string());
+                last_message = Some(err.to_string());
+            }
+        }
+
+        if attempt < max_attempts {
+            let backoff = delay_ms.saturating_mul(u64::from(attempt));
+            thread::sleep(Duration::from_millis(backoff.max(10)));
+        }
+    }
+
+    QueryDiagnostic {
+        ok: false,
+        attempts: max_attempts,
+        error_code: last_code,
+        message: last_message,
+    }
+}
+
+fn parse_coord_pair(raw: &str) -> Option<(i64, i64)> {
+    let mut parts = raw.split(',');
+    let x = parts.next()?.trim().parse::<f64>().ok()?.round() as i64;
+    let y = parts.next()?.trim().parse::<f64>().ok()?.round() as i64;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((x, y))
+}
+
+fn escape_osascript_string(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn parse_hotkey_combo(raw: &str) -> Result<HotkeySpec> {
+    let combo = raw.trim().to_string();
+    if combo.is_empty() {
+        bail!("hotkey combo is empty");
+    }
+    let tokens: Vec<String> = combo
+        .split('+')
+        .map(|item| item.trim().to_ascii_lowercase())
+        .filter(|item| !item.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        bail!("hotkey combo is empty");
+    }
+
+    let mut modifiers = Vec::<String>::new();
+    let mut key_token: Option<String> = None;
+
+    for token in tokens {
+        let mapped = match token.as_str() {
+            "cmd" | "command" => Some("command down"),
+            "ctrl" | "control" => Some("control down"),
+            "alt" | "option" | "opt" => Some("option down"),
+            "shift" => Some("shift down"),
+            "fn" | "function" => Some("fn down"),
+            _ => None,
+        };
+
+        if let Some(modifier) = mapped {
+            if !modifiers.iter().any(|m| m == modifier) {
+                modifiers.push(modifier.to_string());
+            }
+        } else {
+            key_token = Some(token);
+        }
+    }
+
+    let key = key_token.ok_or_else(|| anyhow::anyhow!("hotkey requires a key token"))?;
+    let key_code = match key.as_str() {
+        "enter" | "return" => Some(36),
+        "tab" => Some(48),
+        "space" => Some(49),
+        "esc" | "escape" => Some(53),
+        "delete" | "backspace" => Some(51),
+        "left" => Some(123),
+        "right" => Some(124),
+        "down" => Some(125),
+        "up" => Some(126),
+        _ => None,
+    };
+
+    Ok(HotkeySpec {
+        combo,
+        key,
+        modifiers,
+        key_code,
+    })
+}
+
+fn hotkey_script(spec: &HotkeySpec) -> String {
+    let modifiers = if spec.modifiers.is_empty() {
+        None
+    } else {
+        Some(format!("{{{}}}", spec.modifiers.join(", ")))
+    };
+
+    if let Some(code) = spec.key_code {
+        if let Some(using) = modifiers {
+            format!("tell application \"System Events\" to key code {code} using {using}")
+        } else {
+            format!("tell application \"System Events\" to key code {code}")
+        }
+    } else {
+        let key_text = if spec.key == "space" {
+            " ".to_string()
+        } else {
+            escape_osascript_string(&spec.key)
+        };
+        if let Some(using) = modifiers {
+            format!("tell application \"System Events\" to keystroke \"{key_text}\" using {using}")
+        } else {
+            format!("tell application \"System Events\" to keystroke \"{key_text}\"")
+        }
+    }
+}
+
 fn parse_window_candidates(raw: &str) -> Vec<WindowCandidate> {
     let mut items = Vec::new();
     for line in raw.lines() {
@@ -4588,5 +5120,28 @@ mod tests {
         assert_eq!(selected.index, 2);
         assert_eq!(mode, "largest_any");
         assert_eq!(usable_count, 0);
+    }
+
+    #[test]
+    fn parse_hotkey_combo_parses_modifiers_and_key() {
+        let spec = parse_hotkey_combo("cmd+shift+p").unwrap();
+        assert_eq!(spec.key, "p");
+        assert_eq!(spec.key_code, None);
+        assert_eq!(spec.modifiers, vec!["command down", "shift down"]);
+    }
+
+    #[test]
+    fn parse_hotkey_combo_maps_special_keys_to_keycode() {
+        let spec = parse_hotkey_combo("ctrl+enter").unwrap();
+        assert_eq!(spec.key, "enter");
+        assert_eq!(spec.key_code, Some(36));
+        assert_eq!(spec.modifiers, vec!["control down"]);
+    }
+
+    #[test]
+    fn parse_coord_pair_requires_two_values() {
+        assert_eq!(parse_coord_pair("120,80"), Some((120, 80)));
+        assert_eq!(parse_coord_pair("120"), None);
+        assert_eq!(parse_coord_pair("120,80,1"), None);
     }
 }

@@ -41,6 +41,11 @@ codex-auto
   - `codex-visual-loop loop <current.png> <baseline-name>`
 - Observation packet (before/after + clip + diff):
   - `codex-visual-loop observe --process "<App>" --action "<label>" --json`
+  - click/keystroke action example:
+    - `codex-visual-loop observe --process "Google Chrome" --action "search" --duration 3 --action-cmd 'osascript -e "tell application \"Google Chrome\" to activate" -e "delay 0.2" -e "tell application \"System Events\" to keystroke \"l\" using command down" -e "tell application \"System Events\" to keystroke \"codex visual loop\"" -e "key code 36"'`
+- Native action command (click/type/hotkey):
+  - `codex-visual-loop act --process "Google Chrome" --hotkey cmd+l --text "openai.com" --enter --json`
+  - `codex-visual-loop act --process "iTerm2" --click-rel 120,80 --text "omx --xhigh --madmax" --enter --json`
 - Accessibility tree:
   - `codex-visual-loop ax-tree --process "<App>" --depth 3 --json`
 - Explain app state (capture + AX + Codex report):
@@ -61,6 +66,7 @@ Preserve command names exactly:
 - `loop`
 - `observe`
 - `ax-tree`
+- `act`
 
 ## Minimal Codex workflow
 

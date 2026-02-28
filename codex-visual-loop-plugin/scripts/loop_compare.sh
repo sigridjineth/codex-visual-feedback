@@ -26,6 +26,9 @@ USAGE
 }
 
 
+out_root="${CVLP_OUT_DIR:-.codex-visual-loop}"
+loop_dir="${CVLP_LOOP_DIR:-${out_root}/loop}"
+
 # Backward-compat: if the legacy layout exists and the new one doesn't, keep using legacy by default.
 if [[ -z "${CVLP_LOOP_DIR:-}" && -d "${out_root}/baselines" && ! -d "${out_root}/loop/baselines" ]]; then
   loop_dir="${out_root}"

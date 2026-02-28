@@ -3,7 +3,7 @@
 Dump AX tree JSON for a target app process.
 
 ```bash
-codex-visual-loop ax-tree --process "Promptlight" --depth 3 --json
+codex-visual-loop ax-tree --process "Google Chrome" --depth 3 --json
 ```
 
 Common options:

@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TaskFlow — Project Dashboard</title>
+<style>
+  /* ── Reset & Variables ─────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --primary: #4f46e5;
+    --primary-light: #6366f1;
+    --primary-dark: #3730a3;
+    --sidebar-bg: #1e1b4b;
+    --sidebar-text: #c7d2fe;
+    --sidebar-active: #4f46e5;
+    --bg: #f1f5f9;
+    --card-bg: #ffffff;
+    --text: #1e293b;
+    --text-muted: #64748b;
+    --border: #e2e8f0;
+    --danger: #ef4444;
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --radius: 10px;
+    --shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
+    --shadow-md: 0 4px 6px rgba(0,0,0,.07), 0 2px 4px rgba(0,0,0,.05);
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Sidebar ───────────────────────────────────────────── */
+  .sidebar {
+    width: 240px;
+    min-height: 100vh;
+    background: var(--sidebar-bg);
+    color: var(--sidebar-text);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+  }
+
+  .sidebar-brand {
+    padding: 24px 20px;
+    font-size: 20px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -0.3px;
+    border-bottom: 1px solid rgba(255,255,255,.08);
+  }
+  .sidebar-brand span { color: var(--primary-light); }
+
+  .sidebar-nav { padding: 16px 0; flex: 1; }
+
+  .sidebar-nav a {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 20px;
+    color: var(--sidebar-text);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    border-left: 3px solid transparent;
+    transition: all .15s ease;
+  }
+  .sidebar-nav a:hover { background: rgba(255,255,255,.06); }
+  .sidebar-nav a.active {
+    background: rgba(79,70,229,.18);
+    color: #fff;
+    border-left-color: var(--primary-light);
+  }
+
+  .sidebar-nav .nav-icon {
+    width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+  }
+
+  .sidebar-section-label {
+    padding: 20px 20px 6px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .8px;
+    color: rgba(199,210,254,.45);
+    font-weight: 600;
+  }
+
+  .sidebar-footer {
+    padding: 16px 20px;
+    border-top: 1px solid rgba(255,255,255,.08);
+    font-size: 12px;
+    color: rgba(199,210,254,.4);
+  }
+
+  /* ── Main Content ──────────────────────────────────────── */
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  /* ── Header ────────────────────────────────────────────── */
+  .header {
+    height: 64px;
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 32px;
+    position: relative;
+    z-index: 10;
+  }
+
+  .header-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .header-search {
+    padding: 7px 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+    width: 220px;
+    outline: none;
+    font-family: var(--font);
+    transition: border-color .15s;
+  }
+  .header-search:focus { border-color: var(--primary); }
+
+  /* ── BUG 2: Notification Badge ─────────────────────────── */
+  .notification-bell {
+    position: relative;
+    cursor: pointer;
+    font-size: 20px;
+    padding: 6px;
+  }
+
+  .notification-badge {
+    position: absolute;
+    background: var(--danger);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    /* BUGGY STATE — badge is oversized and overlaps header title */
+    width: 38px;
+    height: 38px;
+    top: -14px;
+    right: -22px;
+    z-index: 20;
+  }
+  .notification-badge.fixed {
+    width: 18px;
+    height: 18px;
+    top: -2px;
+    right: -4px;
+    font-size: 10px;
+  }
+
+  .avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  /* ── Content Area ──────────────────────────────────────── */
+  .content {
+    padding: 28px 32px;
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .content-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+  }
+
+  .content-header h2 {
+    font-size: 22px;
+    font-weight: 700;
+  }
+
+  /* ── Stat Cards ────────────────────────────────────────── */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 20px;
+    margin-bottom: 28px;
+  }
+
+  .stat-card {
+    background: var(--card-bg);
+    border-radius: var(--radius);
+    padding: 20px;
+    box-shadow: var(--shadow);
+    border: 1px solid var(--border);
+  }
+
+  .stat-card .label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+  .stat-card .value {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .stat-card .change {
+    font-size: 12px;
+    margin-top: 4px;
+  }
+  .stat-card .change.up { color: var(--success); }
+  .stat-card .change.down { color: var(--danger); }
+
+  /* ── Two-column grid ───────────────────────────────────── */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin-bottom: 28px;
+  }
+
+  /* ── Card ───────────────────────────────────────────────── */
+  .card {
+    background: var(--card-bg);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    border: 1px solid var(--border);
+    overflow: hidden;       /* important: clips children to card bounds */
+  }
+
+  .card-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    font-size: 15px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .card-body { padding: 20px; }
+
+  /* ── Form ───────────────────────────────────────────────── */
+  .form-group {
+    margin-bottom: 16px;
+  }
+
+  .form-group label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 5px;
+    color: var(--text);
+  }
+
+  .form-control {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 13px;
+    font-family: var(--font);
+    outline: none;
+    transition: border-color .15s;
+  }
+  .form-control:focus { border-color: var(--primary); }
+
+  select.form-control {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 30px;
+  }
+
+  textarea.form-control { resize: vertical; min-height: 70px; }
+
+  /* ── BUG 1: Submit Button Overflow ─────────────────────── */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 9px 18px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: var(--font);
+    cursor: pointer;
+    border: none;
+    transition: background .15s, transform .1s;
+  }
+  .btn:active { transform: scale(.97); }
+
+  .btn-primary {
+    background: var(--primary);
+    color: #fff;
+  }
+  .btn-primary:hover { background: var(--primary-dark); }
+
+  .btn-secondary {
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover { background: var(--bg); }
+
+  .btn-submit-buggy {
+    /* BUGGY STATE — button is too wide and overflows the card */
+    width: calc(100% + 50px);
+    margin-right: -10px;   /* partial offset so it visibly extends right */
+  }
+  .btn-submit-buggy.fixed {
+    width: 100%;
+    margin-right: 0;
+  }
+
+  /* ── Table ──────────────────────────────────────────────── */
+  .table-wrap { overflow-x: auto; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  thead th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    border-bottom: 1px solid var(--border);
+    background: #f8fafc;
+  }
+
+  tbody td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    vertical-align: middle;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #f8fafc; }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge-success { background: #dcfce7; color: #166534; }
+  .badge-warning { background: #fef3c7; color: #92400e; }
+  .badge-danger  { background: #fee2e2; color: #991b1b; }
+  .badge-info    { background: #e0e7ff; color: #3730a3; }
+
+  .priority-dot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px;
+  }
+  .priority-high { background: var(--danger); }
+  .priority-med  { background: var(--warning); }
+  .priority-low  { background: var(--success); }
+
+  /* ── BUG 3: Load-More Layout Break ─────────────────────── */
+  .load-more-wrap {
+    padding: 14px 20px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: center;
+  }
+
+  .table-buggy-extra-row td {
+    /* BUGGY STATE — injected row with broken layout */
+    padding: 28px 14px;
+    font-size: 18px;
+    background: #fef9c3;
+    letter-spacing: 2px;
+    line-height: 2.2;
+  }
+
+  .table-buggy-gap {
+    /* a visible gap row */
+    height: 40px;
+    background: var(--bg);
+  }
+  .table-buggy-gap td {
+    padding: 0;
+    border-bottom: none;
+    background: var(--bg);
+  }
+
+  /* ── Toast ──────────────────────────────────────────────── */
+  .toast {
+    position: fixed;
+    bottom: 28px;
+    right: 28px;
+    background: var(--text);
+    color: #fff;
+    padding: 12px 22px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 0 8px 24px rgba(0,0,0,.18);
+    opacity: 0;
+    transform: translateY(12px);
+    transition: all .25s ease;
+    z-index: 9999;
+    pointer-events: none;
+  }
+  .toast.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* ── Misc ───────────────────────────────────────────────── */
+  .text-muted { color: var(--text-muted); }
+  .text-sm    { font-size: 13px; }
+</style>
+</head>
+<body>
+
+<!-- ───── Sidebar ───── -->
+<aside class="sidebar">
+  <div class="sidebar-brand">Task<span>Flow</span></div>
+  <nav class="sidebar-nav">
+    <div class="sidebar-section-label">Main</div>
+    <a href="#" class="active"><span class="nav-icon">&#9632;</span> Dashboard</a>
+    <a href="#"><span class="nav-icon">&#9998;</span> Tasks</a>
+    <a href="#"><span class="nav-icon">&#128203;</span> Projects</a>
+    <a href="#"><span class="nav-icon">&#128197;</span> Calendar</a>
+    <div class="sidebar-section-label">Workspace</div>
+    <a href="#"><span class="nav-icon">&#128101;</span> Team</a>
+    <a href="#"><span class="nav-icon">&#128200;</span> Reports</a>
+    <a href="#"><span class="nav-icon">&#9881;</span> Settings</a>
+  </nav>
+  <div class="sidebar-footer">TaskFlow v2.4.1</div>
+</aside>
+
+<!-- ───── Main ───── -->
+<div class="main">
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-title" id="headerTitle">Project Dashboard</div>
+    <div class="header-actions">
+      <input type="text" class="header-search" placeholder="Search tasks...">
+      <!-- BUG 2: oversized notification badge overlaps header content -->
+      <div class="notification-bell" id="notifBell">
+        &#128276;
+        <span class="notification-badge" id="notifBadge">9</span>
+      </div>
+      <div class="avatar">JK</div>
+    </div>
+  </header>
+
+  <!-- Content -->
+  <div class="content">
+    <div class="content-header">
+      <h2>Overview</h2>
+      <div style="display:flex;gap:10px;">
+        <button class="btn btn-secondary" style="font-size:12px;">Export</button>
+        <button class="btn btn-primary" style="font-size:12px;">+ New Task</button>
+      </div>
+    </div>
+
+    <!-- Stats Row -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="label">Total Tasks</div>
+        <div class="value">284</div>
+        <div class="change up">+12% this week</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">In Progress</div>
+        <div class="value">43</div>
+        <div class="change up">+5% this week</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Completed</div>
+        <div class="value">198</div>
+        <div class="change up">+8% this week</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Overdue</div>
+        <div class="value">7</div>
+        <div class="change down">+2 since yesterday</div>
+      </div>
+    </div>
+
+    <!-- Two-column: Form + Activity -->
+    <div class="two-col">
+
+      <!-- ── Create Task Card (BUG 1 lives here) ── -->
+      <div class="card" id="formCard">
+        <div class="card-header">Create New Task</div>
+        <div class="card-body">
+          <div class="form-group">
+            <label>Task Name</label>
+            <input type="text" class="form-control" placeholder="e.g. Redesign landing page">
+          </div>
+          <div class="form-group">
+            <label>Assignee</label>
+            <select class="form-control">
+              <option>Julia Kim</option>
+              <option>Alex Torres</option>
+              <option>Ravi Patel</option>
+              <option>Sara Chen</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Priority</label>
+            <select class="form-control">
+              <option>High</option>
+              <option selected>Medium</option>
+              <option>Low</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Description</label>
+            <textarea class="form-control" placeholder="Add details..."></textarea>
+          </div>
+          <!-- BUG 1: button overflows card container -->
+          <button class="btn btn-primary btn-submit-buggy" id="submitBtn">Create Task</button>
+        </div>
+      </div>
+
+      <!-- Activity Card -->
+      <div class="card">
+        <div class="card-header">Recent Activity</div>
+        <div class="card-body" style="font-size:13px;">
+          <div style="display:flex;flex-direction:column;gap:14px;">
+            <div style="display:flex;gap:10px;align-items:flex-start;">
+              <div style="width:6px;height:6px;border-radius:50%;background:var(--primary);margin-top:6px;flex-shrink:0;"></div>
+              <div><strong>Julia Kim</strong> completed <em>API integration</em><br><span class="text-muted text-sm">2 minutes ago</span></div>
+            </div>
+            <div style="display:flex;gap:10px;align-items:flex-start;">
+              <div style="width:6px;height:6px;border-radius:50%;background:var(--success);margin-top:6px;flex-shrink:0;"></div>
+              <div><strong>Alex Torres</strong> deployed <em>v2.4.1</em> to staging<br><span class="text-muted text-sm">18 minutes ago</span></div>
+            </div>
+            <div style="display:flex;gap:10px;align-items:flex-start;">
+              <div style="width:6px;height:6px;border-radius:50%;background:var(--warning);margin-top:6px;flex-shrink:0;"></div>
+              <div><strong>Ravi Patel</strong> flagged <em>Auth token refresh</em> as blocked<br><span class="text-muted text-sm">34 minutes ago</span></div>
+            </div>
+            <div style="display:flex;gap:10px;align-items:flex-start;">
+              <div style="width:6px;height:6px;border-radius:50%;background:var(--danger);margin-top:6px;flex-shrink:0;"></div>
+              <div><strong>Sara Chen</strong> reopened <em>Payment webhook failure</em><br><span class="text-muted text-sm">1 hour ago</span></div>
+            </div>
+            <div style="display:flex;gap:10px;align-items:flex-start;">
+              <div style="width:6px;height:6px;border-radius:50%;background:var(--primary);margin-top:6px;flex-shrink:0;"></div>
+              <div><strong>Julia Kim</strong> added comment on <em>Dashboard redesign</em><br><span class="text-muted text-sm">2 hours ago</span></div>
+            </div>
+            <div style="display:flex;gap:10px;align-items:flex-start;">
+              <div style="width:6px;height:6px;border-radius:50%;background:var(--success);margin-top:6px;flex-shrink:0;"></div>
+              <div><strong>Alex Torres</strong> merged PR #247 <em>Fix date picker</em><br><span class="text-muted text-sm">3 hours ago</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Data Table Card (BUG 3 lives here) -->
+    <div class="card" id="tableCard">
+      <div class="card-header">
+        <span>Active Tasks</span>
+        <span class="text-muted text-sm">Showing 5 of 43</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Task</th>
+              <th>Assignee</th>
+              <th>Priority</th>
+              <th>Status</th>
+              <th>Due</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody">
+            <tr>
+              <td>Redesign onboarding flow</td>
+              <td>Julia Kim</td>
+              <td><span class="priority-dot priority-high"></span>High</td>
+              <td><span class="badge badge-warning">In Review</span></td>
+              <td>Mar 2</td>
+            </tr>
+            <tr>
+              <td>Implement SSO integration</td>
+              <td>Alex Torres</td>
+              <td><span class="priority-dot priority-high"></span>High</td>
+              <td><span class="badge badge-info">In Progress</span></td>
+              <td>Mar 5</td>
+            </tr>
+            <tr>
+              <td>Fix date-picker timezone bug</td>
+              <td>Ravi Patel</td>
+              <td><span class="priority-dot priority-med"></span>Medium</td>
+              <td><span class="badge badge-info">In Progress</span></td>
+              <td>Mar 3</td>
+            </tr>
+            <tr>
+              <td>Write API documentation</td>
+              <td>Sara Chen</td>
+              <td><span class="priority-dot priority-low"></span>Low</td>
+              <td><span class="badge badge-success">Done</span></td>
+              <td>Feb 28</td>
+            </tr>
+            <tr>
+              <td>Set up CI/CD pipeline</td>
+              <td>Alex Torres</td>
+              <td><span class="priority-dot priority-med"></span>Medium</td>
+              <td><span class="badge badge-warning">In Review</span></td>
+              <td>Mar 7</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="load-more-wrap">
+        <button class="btn btn-secondary" id="loadMoreBtn">Load More</button>
+      </div>
+    </div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  let bugsFixed = false;
+  let loadMoreClicked = false;
+
+  const submitBtn    = document.getElementById('submitBtn');
+  const notifBadge   = document.getElementById('notifBadge');
+  const loadMoreBtn  = document.getElementById('loadMoreBtn');
+  const tableBody    = document.getElementById('tableBody');
+  const toast        = document.getElementById('toast');
+
+  // ── Toast helper ────────────────────────────────────────
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.classList.add('visible');
+    setTimeout(() => toast.classList.remove('visible'), 2200);
+  }
+
+  // ── BUG 3: Load More click ──────────────────────────────
+  function insertBuggyRows() {
+    // Insert a weird gap row + an oversized row to break layout
+    const gapRow = document.createElement('tr');
+    gapRow.className = 'table-buggy-gap buggy-injected';
+    gapRow.innerHTML = '<td colspan="5"></td>';
+
+    const bigRow = document.createElement('tr');
+    bigRow.className = 'table-buggy-extra-row buggy-injected';
+    bigRow.innerHTML = `
+      <td colspan="2" style="position:relative; top:-8px;">Upgrade payment gateway</td>
+      <td><span class="priority-dot priority-high" style="width:14px;height:14px;"></span>URGENT</td>
+      <td><span class="badge badge-danger" style="font-size:15px;padding:6px 16px;">Overdue!!</span></td>
+      <td style="font-size:20px;font-weight:800;color:var(--danger);">YESTERDAY</td>
+    `;
+
+    const normalRow = document.createElement('tr');
+    normalRow.className = 'buggy-injected';
+    normalRow.innerHTML = `
+      <td>Add user avatar upload</td>
+      <td>Sara Chen</td>
+      <td><span class="priority-dot priority-low"></span>Low</td>
+      <td><span class="badge badge-info">In Progress</span></td>
+      <td>Mar 12</td>
+    `;
+
+    tableBody.appendChild(gapRow);
+    tableBody.appendChild(bigRow);
+    tableBody.appendChild(normalRow);
+  }
+
+  function insertCleanRows() {
+    const rows = [
+      { task: 'Upgrade payment gateway', assignee: 'Ravi Patel', pClass: 'priority-high', pLabel: 'High', badge: 'badge-danger', status: 'Overdue', due: 'Feb 27' },
+      { task: 'Add user avatar upload',  assignee: 'Sara Chen',  pClass: 'priority-low',  pLabel: 'Low',  badge: 'badge-info',   status: 'In Progress', due: 'Mar 12' },
+      { task: 'Optimize image pipeline', assignee: 'Julia Kim',  pClass: 'priority-med',  pLabel: 'Medium', badge: 'badge-info', status: 'In Progress', due: 'Mar 10' },
+    ];
+    rows.forEach(r => {
+      const tr = document.createElement('tr');
+      tr.className = 'clean-injected';
+      tr.innerHTML = `
+        <td>${r.task}</td>
+        <td>${r.assignee}</td>
+        <td><span class="priority-dot ${r.pClass}"></span>${r.pLabel}</td>
+        <td><span class="badge ${r.badge}">${r.status}</span></td>
+        <td>${r.due}</td>
+      `;
+      tableBody.appendChild(tr);
+    });
+  }
+
+  loadMoreBtn.addEventListener('click', function () {
+    if (loadMoreClicked) return;
+    loadMoreClicked = true;
+    loadMoreBtn.textContent = 'Loading...';
+    setTimeout(() => {
+      // remove any previously injected rows
+      tableBody.querySelectorAll('.buggy-injected, .clean-injected').forEach(r => r.remove());
+      if (bugsFixed) {
+        insertCleanRows();
+      } else {
+        insertBuggyRows();
+      }
+      loadMoreBtn.textContent = 'Loaded';
+      loadMoreBtn.disabled = true;
+    }, 400);
+  });
+
+  // ── Toggle bugs (Ctrl+F / Cmd+F) ───────────────────────
+  document.addEventListener('keydown', function (e) {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+      e.preventDefault();
+      bugsFixed = !bugsFixed;
+
+      // Bug 1: submit button overflow
+      submitBtn.classList.toggle('fixed', bugsFixed);
+
+      // Bug 2: notification badge
+      notifBadge.classList.toggle('fixed', bugsFixed);
+
+      // Bug 3: if load-more was already clicked, swap rows
+      if (loadMoreClicked) {
+        tableBody.querySelectorAll('.buggy-injected, .clean-injected').forEach(r => r.remove());
+        if (bugsFixed) {
+          insertCleanRows();
+        } else {
+          insertBuggyRows();
+        }
+      }
+
+      showToast(bugsFixed ? 'Bugs Fixed!' : 'Bugs Restored!');
+    }
+  });
+})();
+</script>
+</body>
+</html>

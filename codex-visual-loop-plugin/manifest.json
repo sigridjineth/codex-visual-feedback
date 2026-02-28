@@ -13,6 +13,7 @@
     "annotation specs with semantic fields and relative units",
     "diff-to-bbox annotated outputs",
     "action observation packet flow",
+    "native UI actions (click/type/hotkey)",
     "AX tree dump",
     "capture + AX + Codex explain-app reporting",
     "OMX team inbox-aware visual-loop feedback orchestration"
@@ -47,6 +48,11 @@
       "name": "ax-tree",
       "binary": "codex-visual-loop",
       "doc": "commands/ax-tree.md"
+    },
+    {
+      "name": "act",
+      "binary": "codex-visual-loop",
+      "doc": "commands/act.md"
     },
     {
       "name": "explain-app",

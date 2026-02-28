@@ -57,6 +57,7 @@ class CodexVisualLoopPluginTests(unittest.TestCase):
             "loop",
             "observe",
             "ax-tree",
+            "act",
             "explain-app",
             "visual-loop-feedback",
         ):
@@ -70,6 +71,7 @@ class CodexVisualLoopPluginTests(unittest.TestCase):
         self.assertIn("diff", names)
         self.assertIn("observe", names)
         self.assertIn("ax-tree", names)
+        self.assertIn("act", names)
         self.assertIn("explain-app", names)
         for item in payload["commands"]:
             self.assertEqual(item.get("runner"), "rust")
@@ -84,6 +86,7 @@ class CodexVisualLoopPluginTests(unittest.TestCase):
             "loop",
             "observe",
             "ax-tree",
+            "act",
             "explain-app",
             "visual-loop-feedback",
         ):
@@ -444,6 +447,41 @@ Use action "explain-toolbar-state".
         self.assertIn("--depth", ax_stdout)
         self.assertIn("--json", ax_stdout)
         self.assertIn("accessibility", ax_stdout)
+
+    def test_act_help_and_dry_run_payload(self):
+        help_proc = run_cli("act", "--help")
+        help_stdout = help_proc.stdout.lower()
+        self.assertIn("--click", help_stdout)
+        self.assertIn("--click-rel", help_stdout)
+        self.assertIn("--text", help_stdout)
+        self.assertIn("--hotkey", help_stdout)
+        self.assertIn("--dry-run", help_stdout)
+
+        dry_proc = run_cli(
+            "act",
+            "--process",
+            "DemoApp",
+            "--click",
+            "120,80",
+            "--text",
+            "hello",
+            "--hotkey",
+            "cmd+l",
+            "--enter",
+            "--tab",
+            "2",
+            "--dry-run",
+            "--json",
+        )
+        payload = json.loads(dry_proc.stdout)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["process_name"], "DemoApp")
+        action_types = [item["type"] for item in payload["actions"]]
+        self.assertIn("click", action_types)
+        self.assertIn("type", action_types)
+        self.assertIn("hotkey", action_types)
+        self.assertIn("tab", action_types)
+        self.assertIn("enter", action_types)
 
     def test_observe_json_contains_packet_fields_for_explain_pipeline(self):
         with tempfile.TemporaryDirectory() as tmpdir:

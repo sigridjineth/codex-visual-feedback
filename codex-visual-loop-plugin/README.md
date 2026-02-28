@@ -10,6 +10,7 @@ A standalone Rust Codex plugin package for macOS visual automation loops.
 - Baseline/history loop with annotated outputs (`loop`)
 - Action observation packet flow for screenshot→LLM explain pipelines (`observe`)
 - AX tree dump (`ax-tree`)
+- Native UI action command for click/type/hotkey (`act`)
 - One-shot explain-app packet/report command (`explain-app`)
 - OMX inbox-aware visual-loop feedback helper (`visual-loop-feedback`)
 
@@ -61,6 +62,7 @@ codex-visual-loop diff --help
 codex-visual-loop loop --help
 codex-visual-loop observe --help
 codex-visual-loop ax-tree --help
+codex-visual-loop act --help
 codex-visual-loop visual-loop-feedback --help
 codex-auto
 ```

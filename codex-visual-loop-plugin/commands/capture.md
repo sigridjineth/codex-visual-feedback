@@ -3,7 +3,7 @@
 Capture a target app window and emit a metadata sidecar JSON.
 
 ```bash
-codex-visual-loop capture --process "Promptlight" --json
+codex-visual-loop capture --process "Google Chrome" --json
 ```
 
 Common options:
